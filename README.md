@@ -8,7 +8,7 @@ Konsumiert den Feeder
 über Entity-State** (kein Python-Import). Apply ist **gated** (Shadow-safe,
 Default aus) — wie `benni_light_policy`.
 
-**Status:** `0.18.2` — aktive Media-Policy mit PS/S-Consumer-Contract.
+**Status:** `0.18.3` — aktive Media-Policy mit PS/S-Consumer-Contract.
 
 ## PS/S sleep context (#59)
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.18.3 - Post-Entertainment-Resume mit hörbarem HomePods-Ziel
+
+- Ein erlaubter `resume_homepods` (gemerkter manueller Inhalt, `owner=none`) liefert
+  jetzt das bestehende Dayphase-/Matrix-Ziel statt `idle_no_owner` / `0.0`
+  (`volume_reason=resume_homepods_start`); Media Apply verwirft den Resume damit
+  nicht mehr mit `non_positive_target`.
+- Denon-Ziel bleibt `0`; Quiet-, Sleep- und Grind-Zweige sowie
+  `music_baseline_active` bleiben unverändert. `start_radio` ist nicht betroffen.
+- Media Apply unverändert.
+
 ## 0.18.2 - provisional_sleep als Consumer-Schlafkontext (#59)
 
 - `provisional_sleep` nutzt denselben HomePod-/Baseline-Sleep-Modifier wie

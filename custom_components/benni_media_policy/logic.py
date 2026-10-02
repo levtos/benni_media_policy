@@ -980,9 +980,23 @@ def decide(
     baseline_active = baseline_candidate and action == ACTION_START_RADIO
     d.music_baseline_active = baseline_active
 
-    policy, hp, dn, apply_allowed, vol_reason, boost_applied, muted = decide_volume(
-        inp, owner, grind, settings, scenario, baseline_active
+    # Post-Entertainment-Resume: Resume-Soll ist „HomePods spielen" — ohne hörbares
+    # Ziel kollabiert owner=none auf idle_no_owner/0.0 und Apply verwirft den Start.
+    resume_start = (
+        action == ACTION_RESUME
+        and resume_allowed
+        and owner == AUDIO_OWNER_NONE
+        and not grind
+        and not inp.quiet_mode
+        and not inp.bio_sleep
     )
+    hp_start_active = baseline_active or resume_start
+
+    policy, hp, dn, apply_allowed, vol_reason, boost_applied, muted = decide_volume(
+        inp, owner, grind, settings, scenario, hp_start_active
+    )
+    if resume_start and vol_reason == "music_baseline_homepods":
+        vol_reason = "resume_homepods_start"
     # ---- FLEET-153: HomePods-Pfad sticky über Idle-Gaps ----
     # Ein transienter owner=none (Playback-Lücke, Track-/Sender-Wechsel) darf das
     # HomePods-Target NICHT auf 0.0 kollabieren — sonst rampt der Apply-Layer ohne
@@ -991,7 +1005,7 @@ def decide(
     # war; echter Pfadwechsel (→Denon/TV/Gaming) löscht den Stick. Quiet/Ducking
     # bleibt eigener Zweig (hart 0.10, unberührt). Idle ist Geräte-Sache
     # (pause/resume via action), nicht Volume → kein Ramp-Down (OQ-1).
-    hp_on_path = baseline_active or pc_gaming or grind or owner == AUDIO_OWNER_HOMEPODS
+    hp_on_path = hp_start_active or pc_gaming or grind or owner == AUDIO_OWNER_HOMEPODS
     if (
         policy == VOL_POLICY_MEDIA
         and hp_on_path
