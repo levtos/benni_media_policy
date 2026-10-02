@@ -1007,3 +1007,26 @@ def test_sleep_repauses_homepods_preserves_sticky_and_resumes_when_waking():
     assert waking.action == C.ACTION_START_RADIO
     assert waking.homepods_resume_allowed is True
     assert waking.volume_target_homepods == 0.45
+
+
+def test_post_entertainment_resume_has_audible_homepods_target():
+    s = L.OrchestratorState(auto_paused=True, pre_pause_mode=C.RESUME_MODE_MANUAL,
+                            last_homepods_playing=False)
+    d, s2 = _decide(_inp(homepods_state="paused"), state=s)
+    assert d.action == C.ACTION_RESUME
+    assert d.homepods_resume_allowed is True
+    assert d.volume_policy == C.VOL_POLICY_MEDIA
+    assert d.volume_target_homepods > 0.0
+    assert d.volume_target_denon == 0.0
+    assert d.volume_reason == "resume_homepods_start"
+    assert d.music_baseline_active is False
+    assert s2.last_hp_media_target == d.volume_target_homepods
+
+
+def test_resume_start_unchanged_under_quiet_and_sleep():
+    s = L.OrchestratorState(auto_paused=True, pre_pause_mode=C.RESUME_MODE_MANUAL)
+    dq, _ = _decide(_inp(homepods_state="paused", quiet_mode=True), state=s)
+    assert dq.volume_policy == C.VOL_POLICY_DUCKED
+    assert dq.volume_target_homepods == 0.0
+    ds, _ = _decide(_inp(homepods_state="paused", bio_sleep=True), state=s)
+    assert ds.action != C.ACTION_RESUME

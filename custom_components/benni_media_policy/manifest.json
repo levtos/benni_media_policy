@@ -1,7 +1,7 @@
 {
   "domain": "benni_media_policy",
   "name": "Benni Media Policy",
-  "version": "0.18.2",
+  "version": "0.18.3",
   "documentation": "https://github.com/Levtos/benni_media_policy",
   "issue_tracker": "https://github.com/Levtos/benni_media_policy/issues",
   "codeowners": ["@Levtos"],
