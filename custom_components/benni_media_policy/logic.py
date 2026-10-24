@@ -873,8 +873,8 @@ def denon_audio_path(inp: Inputs) -> bool:
 
 def subwoofer_dayphase_ok(inp: Inputs) -> bool:
     """Dayphase-Fenster v3.1 (§6): erlaubte Phase UND frühestens 09:00 lokal.
-    Der 09:00-Floor greift real nur in late_morning (solar/saisonal → kann im
-    Sommer vor 09:00 beginnen); bei unbekannter Lokalzeit reicht die Phase."""
+    Der 09:00-Floor gilt unabhängig von der saisonalen Phase, auch in forenoon;
+    bei unbekannter Lokalzeit reicht weiterhin die Phase."""
     if inp.day_state not in SUB_ALLOWED_PHASES:
         return False
     if inp.local_minute_of_day is not None and inp.local_minute_of_day < SUB_EARLIEST_MINUTE:
@@ -894,7 +894,7 @@ def evaluate_subwoofer(inp: Inputs, grind: bool, denon_path: bool) -> tuple[bool
         return False, "headset_active"
     if inp.opening_any_open and not denon_path:
         return False, "window_open_no_denon_path"
-    # Dayphase-Fenster v3.1 (§6): nur late_morning..late_evening, frühestens 09:00.
+    # Aktuelle Tages-/Abendphasen und kompatible Altwerte, frühestens 09:00.
     if not subwoofer_dayphase_ok(inp):
         if inp.day_state not in SUB_ALLOWED_PHASES:
             return False, "dayphase_window"

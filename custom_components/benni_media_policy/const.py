@@ -148,14 +148,14 @@ BOOST_BLOCK_ACTIVITIES: Final = (ACT_WORK_HOME, ACT_WORK_AWAY)
 
 # --------------------------------------------------------------------------- #
 # Subwoofer-Policy v3.1 (FLEET-39) — Dayphase-Fenster (Lastenheft §6).
-# Erlaubt: late_morning (frühestens 09:00) … einschließlich late_evening.
-# Nicht erlaubt: early_morning, early_night, late_night (+ late_morning vor 09:00).
-# Sonderfall gaming_grind → immer aus (R16, schon im Lift). day_state ist
-# solar/saisonal → die 09:00-Grenze ist ein zusätzlicher Wanduhr-Floor, kein
-# bloßer Phasenrand (late_morning kann im Sommer vor 09:00 beginnen).
+# Erlaubt: forenoon bis einschließlich late_evening; alte Phasenwerte bleiben
+# kompatibel. Vor 09:00 sowie in early_morning/early_night/late_night gesperrt.
+# Sonderfall gaming_grind → immer aus (R16, schon im Lift). Die saisonalen
+# Phasengrenzen ersetzen nicht den zusätzlichen 09:00-Wanduhr-Floor.
 # --------------------------------------------------------------------------- #
 SUB_ALLOWED_PHASES: Final[tuple[str, ...]] = (
-    "late_morning", "forenoon", "afternoon", "early_evening", "late_evening",
+    "late_morning", "forenoon", "midday", "afternoon",
+    "late_afternoon", "early_evening", "evening", "late_evening",
 )
 SUB_EARLIEST_MINUTE: Final[int] = 9 * 60   # 09:00 lokal, Minuten seit Mitternacht
 

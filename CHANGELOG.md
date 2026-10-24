@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.18.4 - Subwoofer-Freigabe für aktuelle Tagesphasen (#34)
+
+- `midday`, `late_afternoon` und `evening` ergänzen die Subwoofer-Freigabeliste.
+  Die bisher akzeptierten Phasenwerte bleiben kompatibel.
+- Die 09:00-Untergrenze, Schutzbedingungen und deren Priorität bleiben erhalten.
+- Regressionen prüfen Grind-Ausstieg, Medien-/Phasenwechsel, Initialberechnung
+  und den bestehenden 09:00-Trigger. Keine Änderung anderer Medienfunktionen.
+
 ## 0.18.3 - Post-Entertainment-Resume mit hörbarem HomePods-Ziel
 
 - Ein erlaubter `resume_homepods` (gemerkter manueller Inhalt, `owner=none`) liefert
