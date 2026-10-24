@@ -325,7 +325,7 @@ class MediaPolicyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.hass, watched, self._on_state_change
             )
             self.entry.async_on_unload(self._unsub_state)
-        # Subwoofer-09:00-Floor (FLEET-39): day_state ist solar/saisonal, also
+        # Subwoofer-09:00-Floor (FLEET-39): day_state ist saisonal, also
         # feuert kein State-Change zwingend um 09:00 — eigener Wanduhr-Tick.
         self._unsub_time = async_track_time_change(
             self.hass, self._on_time_tick, hour=9, minute=0, second=0
