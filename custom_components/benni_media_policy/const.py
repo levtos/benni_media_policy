@@ -119,21 +119,30 @@ VOL_POLICY_BLOCKED: Final = "blocked"
 # --------------------------------------------------------------------------- #
 # Volume-Modell v3.1 (FLEET-38) — Dayphase-Baselines + Boost/Mute.
 # Die per-Phase-Baseline (Lastenheft §6) ERSETZT die alten flachen night/edge-
-# Offsets: die Tagesphase steckt jetzt in der Baseline selbst. Werte slug-gleich
-# mit benni_core_day_state. Unbekannte/fehlende Phase → flacher Fallback-Base
-# (VolumeSettings.homepods_base / .denon_base).
+# Offsets: die Tagesphase steckt jetzt in der Baseline selbst. Die neun Phasen
+# folgen sensor.benni_core_state_day_state; bei fehlender Phase gilt die Fallback-Basis.
 # --------------------------------------------------------------------------- #
 DAY_PHASES: Final[tuple[str, ...]] = (
-    "early_morning", "late_morning", "forenoon", "afternoon",
-    "early_evening", "late_evening", "early_night", "late_night",
+    "early_night", "late_night", "early_morning", "forenoon", "midday",
+    "afternoon", "late_afternoon", "evening", "late_evening",
 )
 HOMEPODS_BASELINES: Final[dict[str, float]] = {
-    "early_morning": 0.25, "late_morning": 0.30, "forenoon": 0.40, "afternoon": 0.45,
-    "early_evening": 0.40, "late_evening": 0.35, "early_night": 0.30, "late_night": 0.25,
+    "early_night": 0.30, "late_night": 0.25, "early_morning": 0.25,
+    "forenoon": 0.40, "midday": 0.45, "afternoon": 0.45,
+    "late_afternoon": 0.40, "evening": 0.40, "late_evening": 0.35,
 }
 DENON_BASELINES: Final[dict[str, float]] = {
-    "early_morning": 0.20, "late_morning": 0.25, "forenoon": 0.30, "afternoon": 0.30,
-    "early_evening": 0.30, "late_evening": 0.30, "early_night": 0.25, "late_night": 0.20,
+    "early_night": 0.25, "late_night": 0.20, "early_morning": 0.20,
+    "forenoon": 0.30, "midday": 0.30, "afternoon": 0.30,
+    "late_afternoon": 0.30, "evening": 0.30, "late_evening": 0.30,
+}
+LEGACY_BASE_PHASES: Final[dict[str, str]] = {
+    "forenoon": "late_morning",
+    "late_afternoon": "early_evening",
+    "evening": "early_evening",
+}
+DEFAULT_BOOST_PHASES: Final[dict[str, bool]] = {
+    phase: phase not in ("early_night", "late_night") for phase in DAY_PHASES
 }
 
 # Musik-Title-Classifier-Enum (HomePods) — R18 Boost / R19 Mute.
@@ -178,6 +187,7 @@ CONF_DENON_ACTIVE: Final[str] = "denon_active_entity"  # Core-Devices Denon Mast
 CONF_SUBWOOFER: Final[str] = "subwoofer_entity"        # nur Target (Apply-Layer)
 CONF_BIO_STATE: Final[str] = "bio_state_entity"
 CONF_DAY_STATE: Final[str] = "day_state_entity"
+CORE_DAY_STATE_ENTITY: Final[str] = "sensor.benni_core_state_day_state"
 CONF_ACTIVITY_STATE: Final[str] = "activity_state_entity"   # R18 Boost-Block (work_*)
 CONF_OPENING: Final[str] = "opening_any_open_entity"   # Fenster/Tür offen → Offset
 CORE_OPENINGS_MASTER_ENTITY: Final[str] = "sensor.benni_combined_openings"
@@ -228,7 +238,7 @@ PROFILE_PREFILL: Final[dict[str, dict[str, Any]]] = {
         CONF_DENON: "media_player.living_denon",
         CONF_DENON_ACTIVE: "sensor.benni_master_denon",
         CONF_BIO_STATE: "sensor.benni_core_state_bio_state",
-        CONF_DAY_STATE: "sensor.benni_combined_context_day_state",
+        CONF_DAY_STATE: CORE_DAY_STATE_ENTITY,
         CONF_ACTIVITY_STATE: "sensor.benni_core_state_activity_state",
         CONF_OPENING: CORE_OPENINGS_MASTER_ENTITY,
         CONF_HOMEPODS_MUSIC_ENUM: "sensor.title_classifier_musikkatalog_enum",
@@ -244,7 +254,8 @@ PROFILE_PREFILL: Final[dict[str, dict[str, Any]]] = {
 }
 
 LEGACY_ENTITY_MAP: Final[dict[str, str]] = {
-    "sensor.benni_core_day_state": "sensor.benni_combined_context_day_state",
+    "sensor.benni_core_day_state": CORE_DAY_STATE_ENTITY,
+    "sensor.benni_combined_context_day_state": CORE_DAY_STATE_ENTITY,
     # FLEET-94: Fenster-Offset liest Kipp/offen aus dem Openings-Master.
     "sensor.benni_combined_opening_any_open": CORE_OPENINGS_MASTER_ENTITY,
     "sensor.benni_combined_opening_any_open_or_tilted": CORE_OPENINGS_MASTER_ENTITY,

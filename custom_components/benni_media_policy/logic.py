@@ -30,6 +30,7 @@ persistenten OrchestratorState über die Ticks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, Optional
 
 from .const import (
@@ -53,6 +54,8 @@ from .const import (
     CTX_PRIVATE,
     CTX_STREAMING,
     CTX_TV,
+    DAY_PHASES,
+    DEFAULT_BOOST_PHASES,
     DEFAULT_GRIND_DENON_OFFSET,
     DEFAULT_GRIND_HOMEPODS_OFFSET,
     DEFAULT_PRIVATE_DENON_CAP,
@@ -142,6 +145,7 @@ class OrchestratorState:
     # solange HomePods der zuletzt spielende Pfad war. None = kein Stick (noch nie
     # gespielt ODER Pfad ist von HomePods weg, z.B. Denon/TV).
     last_hp_media_target: Optional[float] = None
+    last_hp_unboosted_target: float | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +178,9 @@ class VolumeSettings:
     scenario_off_denon: dict = field(default_factory=dict)
     activity_off_homepods: dict = field(default_factory=dict)
     activity_off_denon: dict = field(default_factory=dict)
+    phase_max_homepods: dict[str, float] = field(default_factory=dict)
+    phase_max_denon: dict[str, float] = field(default_factory=dict)
+    boost_phases: dict[str, bool] = field(default_factory=lambda: dict(DEFAULT_BOOST_PHASES))
 
 
 @dataclass
@@ -394,6 +401,7 @@ def decide_action(
         last_manual_playback_active=state.last_manual_playback_active,
         last_wake_needed=state.last_wake_needed,
         last_hp_media_target=state.last_hp_media_target,
+        last_hp_unboosted_target=state.last_hp_unboosted_target,
     )
     homepods_playing = inp.homepods_state == "playing"
     homepods_missing = not inp.homepods_configured
@@ -546,6 +554,17 @@ def _baseline(day_state: Optional[str], table: dict[str, float], fallback: float
     return fallback
 
 
+def _effective_max(day_state: str | None, phase_max: dict[str, float], global_max: float) -> float:
+    if day_state not in DAY_PHASES:
+        return global_max
+    return min(global_max, phase_max.get(day_state, global_max))
+
+
+def _clamp_target(value: float, hard_max: float) -> float:
+    # The existing three-decimal rounding must not raise a target above its cap.
+    return min(round(_clamp(value, 0.0, hard_max), 3), max(0.0, hard_max))
+
+
 def _assemble(
     base: float, *, szenario_off: float, fenster_off: float, kontext_off: float,
     manual_off: float, boost: float, active_min: float, hard_max: float,
@@ -553,10 +572,30 @@ def _assemble(
     """R17-Formel: Σ der Komponenten, active_min-Boden, hard-Clamp, rund auf 3."""
     target = base + szenario_off + fenster_off + kontext_off + manual_off + boost
     target = max(target, active_min)
-    return round(_clamp(target, 0.0, hard_max), 3)
+    return _clamp_target(target, hard_max)
 
 
-def boost_active(inp: Inputs) -> bool:
+def _homepods_target(
+    inp: Inputs, grind: bool, s: VolumeSettings, scenario: str | None, boost: float
+) -> float:
+    return _assemble(
+        _baseline(inp.day_state, s.base_homepods, s.homepods_base),
+        szenario_off=(s.grind_homepods_offset if grind else 0.0)
+        + s.scenario_off_homepods.get(scenario, 0.0),
+        fenster_off=s.opening_offset_homepods if inp.opening_any_open else 0.0,
+        kontext_off=s.activity_off_homepods.get(inp.activity_context, 0.0),
+        manual_off=inp.manual_nudge,
+        boost=boost,
+        active_min=s.active_min,
+        hard_max=_effective_max(inp.day_state, s.phase_max_homepods, s.homepods_max),
+    )
+
+
+def _boost_phase_allowed(day_state: str | None, s: VolumeSettings) -> bool:
+    return day_state in DAY_PHASES and s.boost_phases.get(day_state, False)
+
+
+def boost_active(inp: Inputs, s: VolumeSettings) -> bool:
     """R18: HomePods-Track-Boost (Musik-Enum 1). Geblockt in work_home/work_away,
     bei Quiet (strukturell schon im Ducked-Zweig) und bei R22 Boost-Reset."""
     if inp.boost_suppressed:
@@ -567,7 +606,7 @@ def boost_active(inp: Inputs) -> bool:
         return False
     if inp.activity_context in BOOST_BLOCK_ACTIVITIES:
         return False
-    return True
+    return _boost_phase_allowed(inp.day_state, s)
 
 
 def music_muted(inp: Inputs) -> bool:
@@ -612,16 +651,17 @@ def decide_volume(
     # control#3: Fenster-Offset je Gerät (gekippt == offen; geschlossen = 0).
     # opening_any_open kommt aus dem dreistufigen core_devices-Master (any_not_
     # closed = gekippt ODER offen) — kein neuer binärer Sensor.
-    win_hp = s.opening_offset_homepods if inp.opening_any_open else 0.0
     win_dn = s.opening_offset_denon if inp.opening_any_open else 0.0
+    hp_max = _effective_max(inp.day_state, s.phase_max_homepods, s.homepods_max)
+    dn_max = _effective_max(inp.day_state, s.phase_max_denon, s.denon_max)
 
     # 3. Ducked: quiet mode (R20 — hart auf ducked_target für aktive Seite[n]).
     if inp.quiet_mode:
         hp = dn = None
         if inp.homepods_configured:
-            hp = round(_clamp(s.ducked_target, 0.0, s.homepods_max), 3) if hp_plays else 0.0
+            hp = _clamp_target(s.ducked_target, hp_max) if hp_plays else 0.0
         if inp.denon_configured:
-            dn = round(_clamp(s.ducked_target, 0.0, s.denon_max), 3) if dn_plays else 0.0
+            dn = _clamp_target(s.ducked_target, dn_max) if dn_plays else 0.0
         return VOL_POLICY_DUCKED, hp, dn, True, "quiet_mode_ducked", False, False
 
     # 4. Idle: kein Owner und kein Grind (aber NICHT wenn die Baseline gerade
@@ -632,7 +672,7 @@ def decide_volume(
         return VOL_POLICY_IDLE, hp, dn, True, "idle_no_owner", False, False
 
     # 5. Media: R17-Formel mit Dayphase-Baselines + Boost/Mute.
-    boost_flag = hp_plays and boost_active(inp)
+    boost_flag = inp.homepods_configured and hp_plays and boost_active(inp, s)
     muted_flag = hp_plays and music_muted(inp)
 
     hp = dn = None
@@ -642,17 +682,7 @@ def decide_volume(
         elif muted_flag:
             hp = 0.0   # R19: Mute übersteuert die berechnete Ziel-Lautstärke.
         else:
-            hp = _assemble(
-                _baseline(inp.day_state, s.base_homepods, s.homepods_base),
-                # GRIND: eigener HomePods-Grind-Offset (Default 0 → normal).
-                szenario_off=(s.grind_homepods_offset if grind else 0.0)
-                + s.scenario_off_homepods.get(scenario, 0.0),
-                fenster_off=win_hp,
-                kontext_off=s.activity_off_homepods.get(inp.activity_context, 0.0),
-                manual_off=inp.manual_nudge,
-                boost=s.boost_offset if boost_flag else 0.0,
-                active_min=s.active_min, hard_max=s.homepods_max,
-            )
+            hp = _homepods_target(inp, grind, s, scenario, s.boost_offset if boost_flag else 0.0)
     if inp.denon_configured:
         if not dn_plays:
             dn = 0.0
@@ -666,13 +696,13 @@ def decide_volume(
                 kontext_off=s.activity_off_denon.get(inp.activity_context, 0.0),
                 manual_off=inp.manual_nudge,
                 boost=0.0,
-                active_min=s.active_min, hard_max=s.denon_max,
+                active_min=s.active_min, hard_max=dn_max,
             )
             # control#3: Private-Time-Denon-Cap. Ceiling NACH der additiven Formel
             # (inkl. Nudge) → ein positiver Nudge kann den Cap nicht überfahren.
             # min() hebt einen bereits niedrigeren Wert nie an.
             if owner == AUDIO_OWNER_PRIVATE:
-                dn = round(min(dn, _clamp(s.private_denon_cap, 0.0, s.denon_max)), 3)
+                dn = _clamp_target(dn, min(s.private_denon_cap, dn_max))
     if music_baseline:
         reason = "music_baseline_homepods"
     elif pc_gaming:
@@ -707,7 +737,9 @@ def volume_breakdown(
         hp_plays, dn_plays = False, False
     if inp.bio_sleep:
         hp_plays = False
-    boost_flag = hp_plays and boost_active(inp)
+    hp_plays = hp_plays and inp.homepods_configured
+    dn_plays = dn_plays and inp.denon_configured
+    boost_flag = hp_plays and boost_active(inp, s)
     is_private = owner == AUDIO_OWNER_PRIVATE
 
     nudge = inp.manual_nudge
@@ -715,22 +747,31 @@ def volume_breakdown(
         base: float, szen: float, act: float, plays: bool, hard_max: float,
         boost: float, window: float, cap: Optional[float] = None,
     ) -> dict[str, Any]:
-        win = window if plays else 0.0
+        win = window if plays and inp.opening_any_open else 0.0
         man = nudge if plays else 0.0
         kontext = act if plays else 0.0
         result = _assemble(
             base, szenario_off=szen, fenster_off=win, kontext_off=kontext,
             manual_off=man, boost=boost, active_min=s.active_min, hard_max=hard_max,
         ) if plays else 0.0
+        effective_boost = 0.0
+        if boost:
+            unboosted = _assemble(
+                base, szenario_off=szen, fenster_off=win, kontext_off=kontext,
+                manual_off=man, boost=0.0, active_min=s.active_min, hard_max=hard_max,
+            )
+            effective_boost = round(result - unboosted, 3)
         out = {
             "base": round(base, 3), "scenario_offset": round(szen, 3),
             "window_offset": round(win, 3), "activity_offset": round(kontext, 3),
             "manual_nudge": round(man, 3), "track_boost": round(boost, 3),
+            "effective_max": hard_max,
+            "track_boost_effective": effective_boost,
             "result": result, "plays": plays,
         }
         # control#3: Private-Time-Cap sichtbar machen (normal / cap / effektiv).
         if cap is not None and plays:
-            capped = round(min(result, _clamp(cap, 0.0, hard_max)), 3)
+            capped = _clamp_target(result, min(cap, hard_max))
             out["cap"] = round(cap, 3)
             out["cap_active"] = capped < result
             out["effective"] = capped
@@ -742,7 +783,8 @@ def volume_breakdown(
             (s.grind_homepods_offset if grind else 0.0)
             + s.scenario_off_homepods.get(scenario, 0.0),
             s.activity_off_homepods.get(inp.activity_context, 0.0),
-            hp_plays, s.homepods_max, s.boost_offset if boost_flag else 0.0,
+            hp_plays, _effective_max(inp.day_state, s.phase_max_homepods, s.homepods_max),
+            s.boost_offset if boost_flag else 0.0,
             s.opening_offset_homepods,
         ),
         "denon": comp(
@@ -750,7 +792,8 @@ def volume_breakdown(
             (s.grind_denon_offset if grind else 0.0)
             + s.scenario_off_denon.get(scenario, 0.0),
             s.activity_off_denon.get(inp.activity_context, 0.0),
-            dn_plays, s.denon_max, 0.0, s.opening_offset_denon,
+            dn_plays, _effective_max(inp.day_state, s.phase_max_denon, s.denon_max),
+            0.0, s.opening_offset_denon,
             s.private_denon_cap if is_private else None,
         ),
     }
@@ -759,7 +802,7 @@ def volume_breakdown(
 # --------------------------------------------------------------------------- #
 # FLEET-102 Stage B — Volume-Matrix-Override-Merge (HA-frei, testbar)
 # --------------------------------------------------------------------------- #
-MATRIX_DIMS: tuple[str, ...] = ("base", "scenario_off", "activity_off")
+MATRIX_DIMS: tuple[str, ...] = ("base", "scenario_off", "activity_off", "phase_max", "boost_allowed")
 MATRIX_DEVICES: tuple[str, ...] = ("homepods", "denon")
 
 
@@ -789,36 +832,41 @@ def apply_matrix_patch(
 ) -> dict[str, Any]:
     """Partiellen Patch in den persistenten Matrix-Override mergen (pure).
 
-    - Dimensionen: base/scenario_off/activity_off × {homepods,denon}.
-    - Werte: float, geclamped (base ∈ [0,1], Offsets ∈ [-1,1]), rund auf 3.
+    - Pegel und Phasen-Maxima ∈ [0,1], Offsets ∈ [-1,1], rund auf 3.
+    - Boost-Freigaben sind boolesch und gelten nur für HomePods.
     - ``None`` als Zellwert löscht den Override dieser Zelle (zurück auf Default).
     - Leere Geräte-/Dimensions-Maps werden entfernt (kein Müll im Store).
     - Unbekannte/ungültige Einträge werden still ignoriert (fail-safe).
     Gibt einen NEUEN Override zurück (Eingabe unverändert)."""
-    ov: dict[str, Any] = {
-        dim: {dev: dict(cells) for dev, cells in (override.get(dim) or {}).items()}
-        for dim in MATRIX_DIMS
-        if override.get(dim)
-    }
+    ov = dict(override)
+    if not isinstance(patch, dict):
+        return ov
     for dim in MATRIX_DIMS:
         pd = patch.get(dim)
         if not isinstance(pd, dict):
             continue
-        lo, hi = (0.0, 1.0) if dim == "base" else (-1.0, 1.0)
-        dim_ov = ov.get(dim, {})
-        for device in MATRIX_DEVICES:
+        lo = -1.0 if dim in ("scenario_off", "activity_off") else 0.0
+        dim_ov = dict(ov.get(dim) or {})
+        for device in ("homepods",) if dim == "boost_allowed" else MATRIX_DEVICES:
             cells = pd.get(device)
             if not isinstance(cells, dict):
                 continue
             dev_ov = dict(dim_ov.get(device) or {})
             for key, val in cells.items():
+                if dim in ("phase_max", "boost_allowed") and key not in DAY_PHASES:
+                    continue
                 if val is None:
                     dev_ov.pop(str(key), None)
-                    continue
-                try:
-                    dev_ov[str(key)] = round(max(lo, min(hi, float(val))), 3)
-                except (TypeError, ValueError):
-                    continue
+                elif dim == "boost_allowed":
+                    if isinstance(val, bool):
+                        dev_ov[key] = val
+                elif dim != "phase_max" or not isinstance(val, bool):
+                    try:
+                        number = float(val)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if isfinite(number):
+                        dev_ov[str(key)] = round(_clamp(number, lo, 1.0), 3)
             if dev_ov:
                 dim_ov[device] = dev_ov
             else:
@@ -1013,8 +1061,15 @@ def decide(
         and not inp.bio_sleep
     ):
         new_state.last_hp_media_target = hp
+        new_state.last_hp_unboosted_target = None
+        if boost_applied:
+            unboosted = _homepods_target(inp, grind, settings, scenario, 0.0)
+            boost_applied = hp != unboosted
+            if boost_applied:
+                new_state.last_hp_unboosted_target = unboosted
     elif policy == VOL_POLICY_MEDIA and not hp_on_path:
         new_state.last_hp_media_target = None
+        new_state.last_hp_unboosted_target = None
     if (
         policy == VOL_POLICY_IDLE
         and inp.homepods_configured
@@ -1022,6 +1077,10 @@ def decide(
         and not inp.bio_sleep
     ):
         hp = new_state.last_hp_media_target
+        if not _boost_phase_allowed(inp.day_state, settings) and new_state.last_hp_unboosted_target is not None:
+            hp = new_state.last_hp_unboosted_target
+        hp_max = _effective_max(inp.day_state, settings.phase_max_homepods, settings.homepods_max)
+        hp = min(hp, max(0.0, hp_max))
         vol_reason = "idle_sticky_homepods"
     d.volume_policy = policy
     d.volume_target_homepods = hp

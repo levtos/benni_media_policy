@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 import time
+from asyncio import Lock
+from math import isfinite
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -40,6 +42,8 @@ from .const import (
     CONF_DENON,
     CONF_DENON_ACTIVE,
     CONF_ENTERTAINMENT_ACTIVE,
+    CONF_GRIND_DENON_OFFSET,
+    CONF_GRIND_HOMEPODS_OFFSET,
     CONF_HEADSET_ACTIVE,
     CONF_HOMEPODS,
     CONF_HOMEPODS_MUSIC_ENUM,
@@ -51,10 +55,10 @@ from .const import (
     CONF_OPENING,
     CONF_PLANNED_RADIO,
     CONF_PRESENCE_STATE,
+    CONF_PRIVATE_DENON_CAP,
     CONF_PROFILE,
     CONF_QUIET_MODE,
     CONF_RADIO_STATION,
-    CONF_WAKE_NEEDED,
     CONF_VOL_ACTIVE_MIN,
     CONF_VOL_BOOST_OFFSET,
     CONF_VOL_DENON_BASE,
@@ -65,17 +69,17 @@ from .const import (
     CONF_VOL_OPENING_OFFSET,
     CONF_VOL_OPENING_OFFSET_DENON,
     CONF_VOL_OPENING_OFFSET_HOMEPODS,
-    CONF_GRIND_DENON_OFFSET,
-    CONF_GRIND_HOMEPODS_OFFSET,
-    CONF_PRIVATE_DENON_CAP,
+    CONF_WAKE_NEEDED,
     CORE_OPENINGS_MASTER_ENTITY,
     CORE_OPENINGS_MEDIA_ATTRIBUTE,
     DAY_PHASES,
     DEFAULT_APPLY_ENABLED,
+    DEFAULT_BOOST_PHASES,
     DEFAULT_PROFILE,
     DENON_BASELINES,
     DOMAIN,
     HOMEPODS_BASELINES,
+    LEGACY_BASE_PHASES,
     MUSIC_ENUM_BOOST,
     NUDGE_MAX,
     NUDGE_MIN,
@@ -141,6 +145,7 @@ class MediaPolicyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # FLEET-102 Stage B: persistenter Volume-Matrix-Override (Store).
         self._matrix_store = make_matrix_store(hass, entry.entry_id)
         self._matrix_override: dict[str, Any] = {}
+        self._matrix_lock = Lock()
         # Musik-Baseline-Debounce: monotone Startzeit des aktuellen „HomePods
         # nicht am Spielen"-Fensters + One-Shot-Timer, der am Debounce-Punkt
         # einen Recompute auslöst (Coordinator ist sonst event-getrieben).
@@ -205,13 +210,31 @@ class MediaPolicyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ov = self._matrix_override or {}
         def _tbl(dim: str, device: str, default: dict) -> dict:
             sub = (ov.get(dim) or {}).get(device) or {}
-            merged = dict(default)
-            for k, v in sub.items():
-                try:
-                    merged[k] = round(float(v), 3)
-                except (TypeError, ValueError):
+            cells = {}
+            for key, value in sub.items():
+                if dim == "phase_max" and (key not in DAY_PHASES or isinstance(value, bool)):
                     continue
-            return merged
+                try:
+                    number = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if isfinite(number) and (dim != "phase_max" or 0.0 <= number <= 1.0):
+                    cells[key] = round(number, 3)
+            if dim == "base":
+                # Keep legacy cells in the Store. A current cell always takes precedence.
+                for phase, legacy in LEGACY_BASE_PHASES.items():
+                    if legacy in cells:
+                        cells.setdefault(phase, cells[legacy])
+            return {**default, **cells}
+
+        boost_overrides = (ov.get("boost_allowed") or {}).get("homepods") or {}
+        boost_phases = {
+            **DEFAULT_BOOST_PHASES,
+            **{
+                phase: value for phase, value in boost_overrides.items()
+                if phase in DAY_PHASES and isinstance(value, bool)
+            },
+        }
 
         return logic.VolumeSettings(
             homepods_base=_f(CONF_VOL_HOMEPODS_BASE),
@@ -233,6 +256,9 @@ class MediaPolicyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             scenario_off_denon=_tbl("scenario_off", "denon", {}),
             activity_off_homepods=_tbl("activity_off", "homepods", {}),
             activity_off_denon=_tbl("activity_off", "denon", {}),
+            phase_max_homepods=_tbl("phase_max", "homepods", {}),
+            phase_max_denon=_tbl("phase_max", "denon", {}),
+            boost_phases=boost_phases,
         )
 
     def matrix(self) -> dict[str, Any]:
@@ -250,6 +276,11 @@ class MediaPolicyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "devices": ["homepods", "denon"],
             },
             "base": {"homepods": dict(s.base_homepods), "denon": dict(s.base_denon)},
+            "phase_max": {
+                "homepods": dict(s.phase_max_homepods),
+                "denon": dict(s.phase_max_denon),
+            },
+            "boost_allowed": {"homepods": dict(s.boost_phases)},
             "scenario_off": {
                 "homepods": dict(s.scenario_off_homepods),
                 "denon": dict(s.scenario_off_denon),
@@ -285,23 +316,21 @@ class MediaPolicyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._matrix_override = stored if isinstance(stored, dict) else {}
 
     async def async_set_matrix(self, patch: dict[str, Any]) -> dict[str, Any]:
-        """Partiellen Matrix-Override mergen, persistieren, neu rechnen. Nur die
-        Tabellen-Dimensionen (base/scenario_off/activity_off) × Gerät; Werte als
-        float geclamped auf [0,1] (base) bzw. [-1,1] (offsets). Gibt die neue
-        effektive Matrix zurück. Merge/Clamp = pure logic.apply_matrix_patch."""
-        self._matrix_override = logic.apply_matrix_patch(
-            self._matrix_override or {}, patch if isinstance(patch, dict) else {}
-        )
-        await self._matrix_store.async_save(self._matrix_override)
-        self.async_set_updated_data(self._compute())
-        return self.matrix()
+        """Partiellen Matrix-Override persistieren und neu rechnen."""
+        async with self._matrix_lock:
+            override = logic.apply_matrix_patch(self._matrix_override, patch)
+            await self._matrix_store.async_save(override)
+            self._matrix_override = override
+            self.async_set_updated_data(self._compute())
+            return self.matrix()
 
     async def async_reset_matrix(self) -> dict[str, Any]:
         """Kompletten Override verwerfen → zurück auf Code-Defaults."""
-        self._matrix_override = {}
-        await self._matrix_store.async_save({})
-        self.async_set_updated_data(self._compute())
-        return self.matrix()
+        async with self._matrix_lock:
+            await self._matrix_store.async_save({})
+            self._matrix_override = {}
+            self.async_set_updated_data(self._compute())
+            return self.matrix()
 
     # ----- control#3: Skalare aus dem Panel → ConfigEntry-Options -----
     async def async_set_scalars(self, patch: dict[str, Any]) -> dict[str, Any]:
@@ -483,10 +512,12 @@ class MediaPolicyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not dbg:
             return {}
         inp = self._build_inputs()
+        dbg["day_state"] = inp.day_state
         dbg["volume_formula"] = logic.volume_breakdown(
             inp, dbg.get("audio_owner", "none"), bool(dbg.get("is_grind", False)),
             self.settings(), dbg.get("audio_scenario"),
-            bool(dbg.get("music_baseline_active", False)),
+            bool(dbg.get("music_baseline_active", False))
+            or dbg.get("volume_reason") == "resume_homepods_start",
         )
         dbg["reasons"] = logic.structured_reasons(dbg)
         dbg["bindings"] = self.bindings()
