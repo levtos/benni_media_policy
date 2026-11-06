@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.18.5 - Neun Tagesphasen, Lautstärkegrenzen und Titel-Boost (#30)
+
+- Die Matrix nutzt alle neun Core-State-Phasen. Frühere Standard-Bindings werden
+  auf den Core-State-Sensor umgestellt. Individuelle Bindings bleiben erhalten.
+- Gespeicherte Basis-Overrides für `late_morning` gelten als Ersatzwert für
+  `forenoon`, die für `early_evening` für `late_afternoon` und `evening`.
+  Explizite Overrides der aktuellen Phase haben Vorrang. Die alten Einträge
+  bleiben gespeichert. `midday` übernimmt die bisherigen Standard-Basiswerte
+  von `afternoon`.
+- Optionales Phasen-Maximum je Gerät, begrenzt durch dessen globales Maximum.
+  Die Grenze greift nach Offsets, Nudge und Boost sowie bei Ducking und beim
+  gehaltenen HomePods-Ziel. Leere Felder erben das globale Maximum.
+- Titel-Boost hat dieselbe Höhe und ist standardmäßig in den sieben Tag- und
+  Abendphasen freigegeben. Die Freigaben sind pro Phase persistent editierbar.
+  Eine unbekannte Phase sperrt den Boost. Der Breakdown zeigt Obergrenze und
+  angeforderten bzw. wirksamen Boost.
+
 ## 0.18.4 - Subwoofer-Freigabe für aktuelle Tagesphasen (#34)
 
 - `midday`, `late_afternoon` und `evening` ergänzen die Subwoofer-Freigabeliste.

@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import sys
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -60,7 +61,21 @@ def runtime(monkeypatch):
     )
     module("homeassistant.helpers.update_coordinator", DataUpdateCoordinator=CoordinatorBase)
     module("homeassistant.util", dt=SimpleNamespace(now=lambda: clock[0]))
-    module("bmp_pure_pkg.storage", make_matrix_store=lambda *_args: object())
+
+    class MatrixStore:
+        data = None
+        fail_save = False
+
+        async def async_load(self):
+            return deepcopy(self.data)
+
+        async def async_save(self, data):
+            if self.fail_save:
+                raise OSError("simulated write failure")
+            self.data = deepcopy(data)
+
+    store = MatrixStore()
+    module("bmp_pure_pkg.storage", make_matrix_store=lambda *_args: store)
 
     path = (
         Path(__file__).resolve().parents[1]
@@ -110,8 +125,90 @@ def runtime(monkeypatch):
         callback(SimpleNamespace(data={"entity_id": bindings[key]}))
 
     return SimpleNamespace(
-        coord=coord, change=change, clock=clock, subscriptions=subscriptions, new=new_coordinator
+        coord=coord,
+        change=change,
+        clock=clock,
+        subscriptions=subscriptions,
+        new=new_coordinator,
+        store=store,
+        entry=entry,
     )
+
+
+def test_phase_matrix_round_trip_and_event_recompute(runtime):
+    legacy = {
+        "base": {
+            "homepods": {"late_morning": 0.31, "forenoon": 0.37, "early_evening": 0.42},
+            "denon": {"late_morning": 0.23, "early_evening": 0.34, "evening": 0.38},
+        },
+        "scenario_off": {"homepods": {"music": 0.03}},
+        "activity_off": {"denon": {"household": -0.06}},
+    }
+    runtime.store.data = deepcopy(legacy)
+    runtime.entry.options = {C.CONF_VOL_HOMEPODS_MAX: 0.66, C.CONF_VOL_BOOST_OFFSET: 0.12}
+    coord = runtime.coord
+    asyncio.run(coord.async_load_matrix())
+    matrix = coord.matrix()
+    assert matrix["override"] == legacy
+    assert matrix["base"]["homepods"]["forenoon"] == 0.37
+    assert matrix["base"]["homepods"]["late_afternoon"] == 0.42
+    assert matrix["base"]["homepods"]["evening"] == 0.42
+    assert matrix["base"]["denon"]["forenoon"] == 0.23
+    assert matrix["base"]["denon"]["evening"] == 0.38
+    assert matrix["phase_max"] == {"homepods": {}, "denon": {}}
+    assert runtime.store.data == legacy
+
+    patch = {
+        "phase_max": {
+            "homepods": {"evening": 0.49, "early_night": 0.2},
+            "denon": {"evening": 0.29},
+        },
+        "boost_allowed": {"homepods": {"late_afternoon": False}},
+    }
+    saved = asyncio.run(coord.async_set_matrix(patch))
+    assert saved["override"] == legacy | patch
+    restarted = runtime.new()
+    asyncio.run(restarted.async_load_matrix())
+    assert restarted.matrix() == saved
+    assert restarted.settings().boost_offset == 0.12
+    assert restarted.settings().homepods_max == 0.66
+    assert restarted.settings().activity_off_denon["household"] == -0.06
+
+    runtime.change(C.CONF_MEDIA_CONTEXT, "idle")
+    runtime.change(C.CONF_HOMEPODS_MUSIC_ENUM, "1")
+    for phase, target, cap, boost in (
+        ("late_afternoon", 0.45, 0.66, False),
+        ("evening", 0.49, 0.49, True),
+        ("early_night", 0.20, 0.20, False),
+        ("unavailable", 0.38, 0.66, False),
+        ("midday", 0.60, 0.66, True),
+    ):
+        runtime.change(C.CONF_DAY_STATE, phase)
+        assert coord.data["volume_target_homepods"] == target
+        assert coord.debug()["track_boost_applied"] is boost
+        assert coord.status()["volume_formula"]["homepods"]["effective_max"] == cap
+
+    cleared = asyncio.run(
+        restarted.async_set_matrix(
+            {
+                "phase_max": {"homepods": {"evening": None}},
+                "boost_allowed": {"homepods": {"late_afternoon": None}},
+            }
+        )
+    )
+    assert "evening" not in cleared["phase_max"]["homepods"]
+    assert cleared["boost_allowed"]["homepods"]["late_afternoon"] is True
+    assert cleared["override"]["base"] == legacy["base"]
+    assert cleared["phase_max"]["denon"]["evening"] == 0.29
+
+
+def test_failed_matrix_save_leaves_previous_settings_active(runtime):
+    coord = runtime.coord
+    previous = coord.matrix()
+    runtime.store.fail_save = True
+    with pytest.raises(OSError, match="simulated write failure"):
+        asyncio.run(coord.async_set_matrix({"phase_max": {"homepods": {"evening": 0.3}}}))
+    assert coord.matrix() == previous
 
 
 def assert_subwoofer(coord, allowed, reason=None):
